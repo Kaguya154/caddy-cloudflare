@@ -1,0 +1,146 @@
+name: Build Custom Caddy with Cloudflare Plugin
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * *'  # 每日 UTC 02:00 (北京时间 10:00) 运行
+
+# 创建 Release 需要 'contents: write' 权限
+permissions:
+  contents: write
+
+concurrency:
+  group: caddy-cloudflare-build
+  cancel-in-progress: true
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      latest_tag: ${{ steps.tag.outputs.latest_tag }}
+      release_exists: ${{ steps.tag.outputs.release_exists }}
+    steps:
+      - name: 安装 jq
+        run: sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: 获取最新 Caddy 标签并检查 Release 是否存在
+        id: tag
+        run: |
+          latest=$(curl -fsSL "https://api.github.com/repos/caddyserver/caddy/releases/latest" | jq -r '.tag_name')
+          # 通过检查 HTTP 状态码，判断当前仓库是否已存在该 Release
+          code=$(curl -s -o /dev/null -w "%{http_code}" "https://api.github.com/repos/${{ github.repository }}/releases/tags/$latest")
+          echo "latest_tag=$latest" >> "$GITHUB_OUTPUT"
+          echo "release_exists=$(if [ "$code" -eq 200 ]; then echo true; else echo false; fi)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.release_exists != 'true'
+    runs-on: ubuntu-latest
+    env:
+      GO_VERSION: '1.25.0'
+      PLUGINS: github.com/caddy-dns/cloudflare@latest
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Go 环境
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      
+      - name: 安装 xcaddy 并准备环境
+        run: |
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+          mkdir -p ./artifacts
+
+      - name: 构建并验证 linux/amd64 版本
+        run: |
+          set -e
+          ARCH=amd64
+          latest_tag='${{ needs.resolve.outputs.latest_tag }}'
+          echo "--- 开始为 linux/$ARCH 构建 Caddy v${latest_tag#v} ---"
+          
+          GOOS=linux GOARCH=$ARCH xcaddy build "$latest_tag" \
+            --with "${{ env.PLUGINS }}" \
+            --output ./caddy
+          
+          # 核心验证步骤: 确保 Cloudflare 插件已编译进去，否则中止工作流
+          echo "正在验证 amd64 二进制文件中的 Cloudflare 插件..."
+          if ! ./caddy list-modules | grep -Fq 'dns.providers.cloudflare'; then
+            echo "错误：在 amd64 版本中未找到 Cloudflare 插件！"
+            exit 1
+          fi
+          echo "验证成功。"
+
+          version="${latest_tag#v}"
+          filename="caddy-${version}-linux-${ARCH}.tar.gz"
+          tar -czf "$filename" caddy
+          sha256sum "$filename" | awk '{print $1}' > "${filename}.sha256"
+          mv "$filename" "${filename}.sha256" ./artifacts/
+          rm ./caddy
+
+      - name: 构建 linux/arm64 版本
+        run: |
+          set -e
+          ARCH=arm64
+          latest_tag='${{ needs.resolve.outputs.latest_tag }}'
+          echo "--- 开始为 linux/$ARCH 构建 Caddy v${latest_tag#v} ---"
+          
+          GOOS=linux GOARCH=$ARCH xcaddy build "$latest_tag" \
+            --with "${{ env.PLUGINS }}" \
+            --output ./caddy
+          
+          version="${latest_tag#v}"
+          filename="caddy-${version}-linux-${ARCH}.tar.gz"
+          tar -czf "$filename" caddy
+          sha256sum "$filename" | awk '{print $1}' > "${filename}.sha256"
+          mv "$filename" "${filename}.sha256" ./artifacts/
+          rm ./caddy
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: caddy-binaries
+          path: ./artifacts/
+
+  release:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.release_exists != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: caddy-binaries
+          path: ./release-files
+
+      - name: 准备 Release 内容
+        id: prep_body
+        run: |
+          build_time="$(date '+%Y-%m-%d %H:%M:%S CST')"
+          # 使用 outputs 以稳健地处理多行文本
+          {
+            echo "body<<EOF"
+            echo "构建基于 Caddy 官方源码，添加了 Cloudflare DNS 插件。"
+            echo ""
+            echo "- **Caddy 版本**: ${{ needs.resolve.outputs.latest_tag }}"
+            echo "- **构建架构**: amd64, arm64"
+            echo "- **构建时间**: ${build_time}"
+            echo "- **官方源码**: https://github.com/caddyserver/caddy"
+            echo "- **插件源码**: https://github.com/caddy-dns/cloudflare"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve.outputs.latest_tag }}
+          name: "Caddy ${{ needs.resolve.outputs.latest_tag }} with Cloudflare DNS"
+          body: ${{ steps.prep_body.outputs.body }}
+          files: ./release-files/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
