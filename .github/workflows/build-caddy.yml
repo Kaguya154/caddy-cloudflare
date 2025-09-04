@@ -70,7 +70,7 @@ jobs:
 
           version="${latest_tag#v}"
           filename="caddy-${version}-linux-${ARCH}.tar.gz"
-          tar -czf "$filename" caddy
+          tar -czf "$filename" caddy.exe
           sha256sum "$filename" | awk '{print $1}' > "${filename}.sha256"
           mv "$filename" "${filename}.sha256" ./artifacts/
           rm ./caddy.exe
@@ -119,4 +119,5 @@ jobs:
         env:
 
           GITHUB_TOKEN: ${{ secrets.TOKEN }}
+
 
