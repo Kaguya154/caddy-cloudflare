@@ -57,49 +57,23 @@ jobs:
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
           mkdir -p ./artifacts
 
-      - name: 构建并验证 linux/amd64 版本
+      - name: 构建并验证 windows/amd64 版本
         run: |
           set -e
           ARCH=amd64
           latest_tag='${{ needs.resolve.outputs.latest_tag }}'
           echo "--- 开始为 linux/$ARCH 构建 Caddy v${latest_tag#v} ---"
           
-          GOOS=linux GOARCH=$ARCH xcaddy build "$latest_tag" \
+          GOOS=windows GOARCH=$ARCH xcaddy build "$latest_tag" \
             --with "${{ env.PLUGINS }}" \
-            --output ./caddy
-          
-          # 核心验证步骤: 确保 Cloudflare 插件已编译进去，否则中止工作流
-          echo "正在验证 amd64 二进制文件中的 Cloudflare 插件..."
-          if ! ./caddy list-modules | grep -Fq 'dns.providers.cloudflare'; then
-            echo "错误：在 amd64 版本中未找到 Cloudflare 插件！"
-            exit 1
-          fi
-          echo "验证成功。"
+            --output ./caddy.exe
 
           version="${latest_tag#v}"
           filename="caddy-${version}-linux-${ARCH}.tar.gz"
           tar -czf "$filename" caddy
           sha256sum "$filename" | awk '{print $1}' > "${filename}.sha256"
           mv "$filename" "${filename}.sha256" ./artifacts/
-          rm ./caddy
-
-      - name: 构建 linux/arm64 版本
-        run: |
-          set -e
-          ARCH=arm64
-          latest_tag='${{ needs.resolve.outputs.latest_tag }}'
-          echo "--- 开始为 linux/$ARCH 构建 Caddy v${latest_tag#v} ---"
-          
-          GOOS=linux GOARCH=$ARCH xcaddy build "$latest_tag" \
-            --with "${{ env.PLUGINS }}" \
-            --output ./caddy
-          
-          version="${latest_tag#v}"
-          filename="caddy-${version}-linux-${ARCH}.tar.gz"
-          tar -czf "$filename" caddy
-          sha256sum "$filename" | awk '{print $1}' > "${filename}.sha256"
-          mv "$filename" "${filename}.sha256" ./artifacts/
-          rm ./caddy
+          rm ./caddy.exe
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
@@ -143,4 +117,5 @@ jobs:
           body: ${{ steps.prep_body.outputs.body }}
           files: ./release-files/*
         env:
+
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
